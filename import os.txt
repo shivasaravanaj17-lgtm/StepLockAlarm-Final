@@ -1,0 +1,1301 @@
+import os
+
+files = {
+    "settings.gradle.kts": """pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "StepLockAlarm"
+include(":app")
+""",
+    "build.gradle.kts": """plugins {
+    id("com.android.application") version "8.5.2" apply false
+    id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+}
+""",
+    "app/build.gradle.kts": """plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+}
+
+android {
+    namespace = "com.example.steplockalarm"
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "com.example.steplockalarm"
+        minSdk = 29
+        targetSdk = 34
+        versionCode = 1
+        versionName = "1.0"
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+    buildFeatures {
+        compose = true
+    }
+    composeOptions {
+        kotlinCompilerExtensionVersion = "1.5.14"
+    }
+}
+
+dependencies {
+    val composeBom = platform("androidx.compose:compose-bom:2024.06.00")
+    implementation(composeBom)
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.activity:activity-compose:1.9.0")
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.material3:material3")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+}
+""",
+    "app/src/main/res/values/strings.xml": """<resources>
+    <string name="app_name">StepLock Alarm</string>
+    <string name="admin_description">Prevents uninstalling or force-stopping StepLock Alarm while an alarm is scheduled or ringing.</string>
+</resources>
+""",
+    "app/src/main/res/xml/device_admin.xml": """<?xml version="1.0" encoding="utf-8"?>
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <force-lock />
+    </uses-policies>
+</device-admin>
+""",
+    "app/src/main/AndroidManifest.xml": """<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH" />
+
+    <application
+        android:allowBackup="true"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+        tools:targetApi="34">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".AlarmRingActivity"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:excludeFromRecents="true"
+            android:showOnLockScreen="true"
+            android:turnScreenOn="true"
+            android:screenOrientation="portrait" />
+
+        <service
+            android:name=".AlarmService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback|health" />
+
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.example.steplockalarm.ACTION_TRIGGER_ALARM" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".AlarmDeviceAdminReceiver"
+            android:description="@string/admin_description"
+            android:label="StepLock Anti-Uninstall Guard"
+            android:permission="android.permission.BIND_DEVICE_ADMIN"
+            android:exported="true">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+</manifest>
+""",
+    "app/src/main/java/com/example/steplockalarm/BootReceiver.kt": """package com.example.steplockalarm
+
+import android.app.AlarmManager
+import android.app.PendingIntent
+import android.app.admin.DeviceAdminReceiver
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.provider.Settings
+import android.widget.Toast
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.flow.MutableStateFlow
+import java.util.Calendar
+
+class AlarmDeviceAdminReceiver : DeviceAdminReceiver() {
+    override fun onEnabled(context: Context, intent: Intent) {
+        Toast.makeText(context, "Anti-Uninstall Guard Enabled", Toast.LENGTH_SHORT).show()
+    }
+
+    override fun onDisableRequested(context: Context, intent: Intent): CharSequence {
+        return "Warning: Disabling Device Admin removes anti-cheat uninstall protection!"
+    }
+}
+
+object AlarmState {
+    private const val PREFS_NAME = "step_lock_prefs"
+    const val ACTION_TRIGGER_ALARM = "com.example.steplockalarm.ACTION_TRIGGER_ALARM"
+
+    val isRingingFlow = MutableStateFlow(false)
+    val currentStepsFlow = MutableStateFlow(0)
+    val targetStepsFlow = MutableStateFlow(250)
+    val isDecayingFlow = MutableStateFlow(false)
+
+    private fun prefs(context: Context) =
+        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    fun getTargetSteps(context: Context): Int = prefs(context).getInt("target_steps", 250)
+    fun setTargetSteps(context: Context, steps: Int) {
+        prefs(context).edit().putInt("target_steps", steps.coerceIn(10, 1000)).apply()
+    }
+
+    fun getAlarmHour(context: Context): Int = prefs(context).getInt("alarm_hour", 7)
+    fun getAlarmMinute(context: Context): Int = prefs(context).getInt("alarm_minute", 0)
+    fun isAlarmEnabled(context: Context): Boolean = prefs(context).getBoolean("alarm_enabled", false)
+    fun getScheduledTimeMillis(context: Context): Long = prefs(context).getLong("scheduled_millis", 0L)
+
+    fun getRingtoneUri(context: Context): String? = prefs(context).getString("ringtone_uri", null)
+    fun setRingtoneUri(context: Context, uri: String?) {
+        prefs(context).edit().putString("ringtone_uri", uri).apply()
+    }
+
+    fun isAlarmRinging(context: Context): Boolean = prefs(context).getBoolean("is_ringing", false)
+    fun getRemainingSteps(context: Context): Int = prefs(context).getInt("remaining_steps", 250)
+
+    fun getActiveTargetSteps(context: Context): Int =
+        prefs(context).getInt("active_target_steps", getTargetSteps(context))
+
+    fun saveRingingProgress(context: Context, ringing: Boolean, remainingSteps: Int, activeTarget: Int) {
+        prefs(context).edit()
+            .putBoolean("is_ringing", ringing)
+            .putInt("remaining_steps", remainingSteps)
+            .putInt("active_target_steps", activeTarget)
+            .apply()
+        isRingingFlow.value = ringing
+        targetStepsFlow.value = activeTarget
+        currentStepsFlow.value = (activeTarget - remainingSteps).coerceAtLeast(0)
+    }
+
+    fun isSettingsFrozen(context: Context): Boolean {
+        if (isAlarmRinging(context)) return true
+        if (!isAlarmEnabled(context)) return false
+        val scheduled = getScheduledTimeMillis(context)
+        val diff = scheduled - System.currentTimeMillis()
+        return diff in 1..(15 * 60 * 1000L)
+    }
+
+    fun scheduleExactAlarm(context: Context, hour: Int, minute: Int): Boolean {
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !alarmManager.canScheduleExactAlarms()) {
+            val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            context.startActivity(intent)
+            return false
+        }
+
+        val calendar = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, hour)
+            set(Calendar.MINUTE, minute)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+            if (timeInMillis <= System.currentTimeMillis()) {
+                add(Calendar.DAY_OF_YEAR, 1)
+            }
+        }
+
+        val triggerIntent = Intent(context, BootReceiver::class.java).apply {
+            action = ACTION_TRIGGER_ALARM
+        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            1001,
+            triggerIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val showIntent = Intent(context, MainActivity::class.java)
+        val showPendingIntent = PendingIntent.getActivity(
+            context,
+            1002,
+            showIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val clockInfo = AlarmManager.AlarmClockInfo(calendar.timeInMillis, showPendingIntent)
+        alarmManager.setAlarmClock(clockInfo, pendingIntent)
+
+        prefs(context).edit()
+            .putInt("alarm_hour", hour)
+            .putInt("alarm_minute", minute)
+            .putBoolean("alarm_enabled", true)
+            .putLong("scheduled_millis", calendar.timeInMillis)
+            .apply()
+
+        return true
+    }
+
+    fun cancelAlarm(context: Context) {
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val triggerIntent = Intent(context, BootReceiver::class.java).apply {
+            action = ACTION_TRIGGER_ALARM
+        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            1001,
+            triggerIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        alarmManager.cancel(pendingIntent)
+        prefs(context).edit()
+            .putBoolean("alarm_enabled", false)
+            .putLong("scheduled_millis", 0L)
+            .apply()
+    }
+}
+
+class BootReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        when (intent.action) {
+            AlarmState.ACTION_TRIGGER_ALARM -> {
+                val target = AlarmState.getTargetSteps(context)
+                AlarmState.saveRingingProgress(context, true, target, target)
+                startAlarmService(context, target, target)
+            }
+            Intent.ACTION_BOOT_COMPLETED,
+            Intent.ACTION_LOCKED_BOOT_COMPLETED,
+            "android.intent.action.QUICKBOOT_POWERON" -> {
+                if (AlarmState.isAlarmRinging(context)) {
+                    val remaining = AlarmState.getRemainingSteps(context)
+                    val activeTarget = AlarmState.getActiveTargetSteps(context)
+                    startAlarmService(context, remaining, activeTarget)
+                } else if (AlarmState.isAlarmEnabled(context)) {
+                    AlarmState.scheduleExactAlarm(
+                        context,
+                        AlarmState.getAlarmHour(context),
+                        AlarmState.getAlarmMinute(context)
+                    )
+                }
+            }
+        }
+    }
+
+    companion object {
+        fun startAlarmService(context: Context, remainingSteps: Int, totalTargetSteps: Int) {
+            val serviceIntent = Intent(context, AlarmService::class.java).apply {
+                putExtra("EXTRA_REMAINING_STEPS", remainingSteps)
+                putExtra("EXTRA_TARGET_STEPS", totalTargetSteps)
+            }
+            ContextCompat.startForegroundService(context, serviceIntent)
+        }
+    }
+}
+""",
+    "app/src/main/java/com/example/steplockalarm/AlarmService.kt": """package com.example.steplockalarm
+
+import android.Manifest
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
+import android.media.MediaPlayer
+import android.media.RingtoneManager
+import android.media.ToneGenerator
+import android.net.Uri
+import android.os.Build
+import android.os.IBinder
+import android.os.PowerManager
+import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlin.math.sqrt
+
+class AlarmService : Service(), SensorEventListener {
+
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var volumeGuardJob: Job? = null
+    private var stepDecayJob: Job? = null
+
+    private var mediaPlayer: MediaPlayer? = null
+    private var toneGenerator: ToneGenerator? = null
+    private var wakeLock: PowerManager.WakeLock? = null
+    private lateinit var sensorManager: SensorManager
+    private lateinit var audioManager: AudioManager
+    private lateinit var notificationManager: NotificationManager
+    private var vibrator: Vibrator? = null
+
+    private var targetSteps = 250
+    private var remainingSteps = 250
+    private var lastValidStepTimestampMs = 0L
+    private var lastAccelStepTimestampMs = 0L
+    private var lastAccelMagnitude = 9.8f
+
+    companion object {
+        private const val CHANNEL_ID = "steplock_alarm_channel"
+        private const val NOTIF_ID = 1
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val vm = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+            vm.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        }
+
+        toneGenerator = runCatching { ToneGenerator(AudioManager.STREAM_ALARM, 100) }.getOrNull()
+
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+            "StepLockAlarm::AlarmWakeLock"
+        ).apply { acquire(60 * 60 * 1000L) }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val defaultTarget = AlarmState.getTargetSteps(this)
+        targetSteps = intent?.getIntExtra("EXTRA_TARGET_STEPS", AlarmState.getActiveTargetSteps(this)) ?: defaultTarget
+        remainingSteps = intent?.getIntExtra("EXTRA_REMAINING_STEPS", AlarmState.getRemainingSteps(this)) ?: targetSteps
+
+        AlarmState.saveRingingProgress(this, true, remainingSteps, targetSteps)
+        lastValidStepTimestampMs = SystemClock.elapsedRealtime()
+        lastAccelStepTimestampMs = SystemClock.elapsedRealtime()
+
+        startForegroundSafely()
+        startLoudAlarmAudio()
+        startVolumeAndSpeakerGuard()
+        registerStepSensors()
+        startStepDecayWatcher()
+        launchLockScreenActivity()
+
+        return START_STICKY
+    }
+
+    private fun buildAlarmNotification(): Notification {
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            "Active StepLock Alarm",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            setSound(null, null)
+            enableVibration(true)
+            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        }
+        notificationManager.createNotificationChannel(channel)
+
+        val fullScreenIntent = Intent(this, AlarmRingActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val fullScreenPendingIntent = PendingIntent.getActivity(
+            this,
+            2001,
+            fullScreenIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return Notification.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+            .setContentTitle("WALK TO STOP ALARM")
+            .setContentText("$remainingSteps / $targetSteps steps remaining to dismiss!")
+            .setCategory(Notification.CATEGORY_ALARM)
+            .setOngoing(true)
+            .setFullScreenIntent(fullScreenPendingIntent, true)
+            .build()
+    }
+
+    private fun startForegroundSafely() {
+        val notification = buildAlarmNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val hasActivityPerm = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACTIVITY_RECOGNITION
+            ) == PackageManager.PERMISSION_GRANTED
+
+            val serviceType = if (hasActivityPerm) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            }
+            startForeground(NOTIF_ID, notification, serviceType)
+        } else {
+            startForeground(NOTIF_ID, notification)
+        }
+    }
+
+    private fun startLoudAlarmAudio() {
+        if (mediaPlayer?.isPlaying == true) return
+
+        val customUriStr = AlarmState.getRingtoneUri(this)
+        val fallbackUri: Uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+
+        val primaryUri: Uri = if (!customUriStr.isNullOrBlank()) {
+            Uri.parse(customUriStr)
+        } else {
+            fallbackUri
+        }
+
+        val audioAttrs = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_ALARM)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
+
+        try {
+            mediaPlayer = MediaPlayer().apply {
+                try {
+                    setAudioAttributes(audioAttrs)
+                    setDataSource(applicationContext, primaryUri)
+                    isLooping = true
+                    prepare()
+                } catch (e: Exception) {
+                    reset()
+                    setAudioAttributes(audioAttrs)
+                    setDataSource(applicationContext, fallbackUri)
+                    isLooping = true
+                    prepare()
+                }
+                forceBuiltInSpeaker(this)
+                start()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        val pattern = longArrayOf(0, 600, 400)
+        vibrator?.vibrate(VibrationEffect.createWaveform(pattern, 0))
+    }
+
+    private fun forceBuiltInSpeaker(player: MediaPlayer?) {
+        val devices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+        val builtInSpeaker = devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+        if (builtInSpeaker != null) {
+            player?.setPreferredDevice(builtInSpeaker)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                runCatching { audioManager.setCommunicationDevice(builtInSpeaker) }
+            }
+        }
+    }
+
+    private fun startVolumeAndSpeakerGuard() {
+        volumeGuardJob?.cancel()
+        volumeGuardJob = serviceScope.launch {
+            while (isActive) {
+                val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_ALARM)
+                val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_ALARM)
+                if (currentVol < maxVol) {
+                    audioManager.setStreamVolume(AudioManager.STREAM_ALARM, maxVol, 0)
+                }
+                forceBuiltInSpeaker(mediaPlayer)
+                delay(500L)
+            }
+        }
+    }
+
+    private fun registerStepSensors() {
+        sensorManager.unregisterListener(this)
+        val hasActivityPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACTIVITY_RECOGNITION
+            ) == PackageManager.PERMISSION_GRANTED
+        } else true
+
+        val stepDetector = if (hasActivityPerm) {
+            sensorManager.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
+        } else null
+
+        if (stepDetector != null) {
+            sensorManager.registerListener(this, stepDetector, SensorManager.SENSOR_DELAY_FASTEST)
+        } else {
+            val accel = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            sensorManager.registerListener(this, accel, SensorManager.SENSOR_DELAY_GAME)
+        }
+    }
+
+    private fun startStepDecayWatcher() {
+        stepDecayJob?.cancel()
+        stepDecayJob = serviceScope.launch {
+            while (isActive) {
+                delay(1000L)
+                val idleMs = SystemClock.elapsedRealtime() - lastValidStepTimestampMs
+                val completedSteps = targetSteps - remainingSteps
+                if (idleMs >= 10_000L && completedSteps > 0) {
+                    AlarmState.isDecayingFlow.value = true
+                    remainingSteps = (remainingSteps + 1).coerceAtMost(targetSteps)
+                    AlarmState.saveRingingProgress(this@AlarmService, true, remainingSteps, targetSteps)
+                    notificationManager.notify(NOTIF_ID, buildAlarmNotification())
+                    runCatching { toneGenerator?.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 250) }
+                } else {
+                    AlarmState.isDecayingFlow.value = false
+                }
+            }
+        }
+    }
+
+    private fun launchLockScreenActivity() {
+        val activityIntent = Intent(this, AlarmRingActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        startActivity(activityIntent)
+    }
+
+    override fun onSensorChanged(event: SensorEvent?) {
+        event ?: return
+        val nowMs = SystemClock.elapsedRealtime()
+
+        if (event.sensor.type == Sensor.TYPE_STEP_DETECTOR) {
+            if (nowMs - lastValidStepTimestampMs >= 285L) {
+                recordValidStep(nowMs)
+            }
+        } else if (event.sensor.type == Sensor.TYPE_ACCELEROMETER) {
+            val x = event.values[0]
+            val y = event.values[1]
+            val z = event.values[2]
+            val mag = sqrt(x * x + y * y + z * z)
+            val delta = mag - lastAccelMagnitude
+            lastAccelMagnitude = mag
+            val interval = nowMs - lastAccelStepTimestampMs
+            if (delta > 6.2f && interval in 320L..1500L) {
+                lastAccelStepTimestampMs = nowMs
+                recordValidStep(nowMs)
+            } else if (delta > 6.2f && interval > 1500L) {
+                lastAccelStepTimestampMs = nowMs
+            }
+        }
+    }
+
+    private fun recordValidStep(nowMs: Long) {
+        lastValidStepTimestampMs = nowMs
+        AlarmState.isDecayingFlow.value = false
+        remainingSteps = (remainingSteps - 1).coerceAtLeast(0)
+        AlarmState.saveRingingProgress(this, remainingSteps > 0, remainingSteps, targetSteps)
+        notificationManager.notify(NOTIF_ID, buildAlarmNotification())
+
+        if (remainingSteps <= 0) {
+            completeAndDismissAlarm()
+        }
+    }
+
+    private fun completeAndDismissAlarm() {
+        AlarmState.saveRingingProgress(this, false, 0, targetSteps)
+        if (AlarmState.isAlarmEnabled(this)) {
+            AlarmState.scheduleExactAlarm(
+                this,
+                AlarmState.getAlarmHour(this),
+                AlarmState.getAlarmMinute(this)
+            )
+        }
+        stopSelf()
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+
+    override fun onDestroy() {
+        volumeGuardJob?.cancel()
+        stepDecayJob?.cancel()
+        serviceScope.cancel()
+        sensorManager.unregisterListener(this)
+        runCatching {
+            mediaPlayer?.stop()
+            mediaPlayer?.release()
+        }
+        vibrator?.cancel()
+        runCatching { toneGenerator?.release() }
+        if (wakeLock?.isHeld == true) {
+            wakeLock?.release()
+        }
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+}
+""",
+    "app/src/main/java/com/example/steplockalarm/AlarmRingActivity.kt": """package com.example.steplockalarm
+
+import android.app.KeyguardManager
+import android.content.Context
+import android.os.Build
+import android.os.Bundle
+import android.view.KeyEvent
+import android.view.WindowManager
+import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+class AlarmRingActivity : ComponentActivity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+            val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+            km.requestDismissKeyguard(this, null)
+        }
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON
+        )
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {}
+        })
+
+        setContent {
+            MaterialTheme {
+                val isRinging by AlarmState.isRingingFlow.collectAsState()
+                val currentSteps by AlarmState.currentStepsFlow.collectAsState()
+                val targetSteps by AlarmState.targetStepsFlow.collectAsState()
+                val isDecaying by AlarmState.isDecayingFlow.collectAsState()
+
+                LaunchedEffect(isRinging) {
+                    if (!isRinging) {
+                        finish()
+                    }
+                }
+
+                AlarmLockScreenUI(
+                    currentSteps = currentSteps,
+                    targetSteps = targetSteps,
+                    isDecaying = isDecaying
+                )
+            }
+        }
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        return when (event.keyCode) {
+            KeyEvent.KEYCODE_VOLUME_DOWN,
+            KeyEvent.KEYCODE_VOLUME_UP,
+            KeyEvent.KEYCODE_VOLUME_MUTE,
+            KeyEvent.KEYCODE_POWER,
+            KeyEvent.KEYCODE_BACK -> true
+            else -> super.dispatchKeyEvent(event)
+        }
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        return when (keyCode) {
+            KeyEvent.KEYCODE_VOLUME_DOWN,
+            KeyEvent.KEYCODE_VOLUME_UP,
+            KeyEvent.KEYCODE_VOLUME_MUTE,
+            KeyEvent.KEYCODE_POWER,
+            KeyEvent.KEYCODE_BACK -> true
+            else -> super.onKeyDown(keyCode, event)
+        }
+    }
+}
+
+@Composable
+fun AlarmLockScreenUI(
+    currentSteps: Int,
+    targetSteps: Int,
+    isDecaying: Boolean
+) {
+    var currentTimeText by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        val sdf = SimpleDateFormat("hh:mm a", Locale.getDefault())
+        while (true) {
+            currentTimeText = sdf.format(Date())
+            delay(1000L)
+        }
+    }
+
+    val progress = (currentSteps.toFloat() / targetSteps.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
+
+    Surface(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0F0F14)),
+        color = Color(0xFF0F0F14)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    text = currentTimeText,
+                    fontSize = 48.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color.White
+                )
+                Text(
+                    text = "NO SNOOZE • VOLUME LOCKED AT 100%",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFFFF5252)
+                )
+            }
+
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier.size(260.dp)
+            ) {
+                CircularProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxSize(),
+                    color = if (isDecaying) Color(0xFFFF1744) else Color(0xFF00E676),
+                    strokeWidth = 18.dp,
+                    trackColor = Color(0xFF262630)
+                )
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "$currentSteps / $targetSteps",
+                        fontSize = 40.sp,
+                        fontWeight = FontWeight.Black,
+                        color = Color.White
+                    )
+                    Text(
+                        text = "STEPS COMPLETED",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFFB0B0C0)
+                    )
+                }
+            }
+
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                if (isDecaying) {
+                    Text(
+                        text = "⚠️ MOVEMENT STOPPED! DECAYING -1 STEP/SEC ⚠️",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFFFF1744),
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+
+                Text(
+                    text = "Get out of bed and walk continuously at a steady pace. Shaking the phone is filtered out.",
+                    fontSize = 16.sp,
+                    color = Color(0xFFD0D0E0),
+                    textAlign = TextAlign.Center
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+        }
+    }
+}
+""",
+    "app/src/main/java/com/example/steplockalarm/MainActivity.kt": """package com.example.steplockalarm
+
+import android.Manifest
+import android.app.AlarmManager
+import android.app.TimePickerDialog
+import android.app.admin.DevicePolicyManager
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.RingtoneManager
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.delay
+import java.util.Locale
+import kotlin.math.roundToInt
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        if (AlarmState.isAlarmRinging(this)) {
+            startActivity(Intent(this, AlarmRingActivity::class.java))
+        }
+
+        setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    StepAlarmDashboard()
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun StepAlarmDashboard() {
+    val context = LocalContext.current
+    val scrollState = rememberScrollState()
+
+    var alarmHour by remember { mutableIntStateOf(AlarmState.getAlarmHour(context)) }
+    var alarmMinute by remember { mutableIntStateOf(AlarmState.getAlarmMinute(context)) }
+    var alarmEnabled by remember { mutableStateOf(AlarmState.isAlarmEnabled(context)) }
+    var stepGoal by remember { mutableIntStateOf(AlarmState.getTargetSteps(context)) }
+    var stepInputText by remember { mutableStateOf(stepGoal.toString()) }
+    var ringtoneUri by remember { mutableStateOf(AlarmState.getRingtoneUri(context)) }
+    var settingsFrozen by remember { mutableStateOf(AlarmState.isSettingsFrozen(context)) }
+    var permissionRefreshTick by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            settingsFrozen = AlarmState.isSettingsFrozen(context)
+            permissionRefreshTick++
+            delay(2000L)
+        }
+    }
+
+    val ringtonePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val uri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            result.data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI, Uri::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            result.data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+        }
+        if (uri != null) {
+            ringtoneUri = uri.toString()
+            AlarmState.setRingtoneUri(context, ringtoneUri)
+        }
+    }
+
+    val mp3PickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            ringtoneUri = uri.toString()
+            AlarmState.setRingtoneUri(context, ringtoneUri)
+        }
+    }
+
+    val runtimePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissionRefreshTick++ }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(scrollState)
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Text(
+            text = "StepLock Hardcore Alarm",
+            fontSize = 26.sp,
+            fontWeight = FontWeight.ExtraBold,
+            color = Color.White
+        )
+
+        if (settingsFrozen) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF5D101D)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "🔒 ANTI-CHEAT FREEZE ACTIVE: Alarm is ringing or within 15 minutes of trigger. Editing is locked!",
+                    modifier = Modifier.padding(14.dp),
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = String.format(Locale.getDefault(), "%02d:%02d", alarmHour, alarmMinute),
+                        fontSize = 44.sp,
+                        fontWeight = FontWeight.Black
+                    )
+                    Switch(
+                        checked = alarmEnabled,
+                        enabled = !settingsFrozen,
+                        onCheckedChange = { enabled ->
+                            if (enabled) {
+                                val scheduledOk = AlarmState.scheduleExactAlarm(context, alarmHour, alarmMinute)
+                                alarmEnabled = scheduledOk
+                                if (scheduledOk) {
+                                    Toast.makeText(context, "Exact Alarm Armed!", Toast.LENGTH_SHORT).show()
+                                }
+                            } else {
+                                alarmEnabled = false
+                                AlarmState.cancelAlarm(context)
+                            }
+                        }
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Button(
+                    enabled = !settingsFrozen,
+                    onClick = {
+                        TimePickerDialog(
+                            context,
+                            { _, selectedHour, selectedMinute ->
+                                alarmHour = selectedHour
+                                alarmMinute = selectedMinute
+                                val scheduledOk = AlarmState.scheduleExactAlarm(context, selectedHour, selectedMinute)
+                                alarmEnabled = scheduledOk
+                            },
+                            alarmHour,
+                            alarmMinute,
+                            false
+                        ).show()
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Change Alarm Time")
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Target Step Count: $stepGoal steps",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Slider(
+                    value = stepGoal.toFloat(),
+                    onValueChange = {
+                        stepGoal = it.roundToInt().coerceIn(10, 1000)
+                        stepInputText = stepGoal.toString()
+                        AlarmState.setTargetSteps(context, stepGoal)
+                    },
+                    valueRange = 10f..1000f,
+                    enabled = !settingsFrozen
+                )
+                OutlinedTextField(
+                    value = stepInputText,
+                    onValueChange = { text ->
+                        stepInputText = text.filter { it.isDigit() }
+                        val parsed = stepInputText.toIntOrNull()
+                        if (parsed != null) {
+                            stepGoal = parsed.coerceIn(10, 1000)
+                            AlarmState.setTargetSteps(context, stepGoal)
+                        }
+                    },
+                    label = { Text("Enter Exact Step Goal (10 - 1000)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    enabled = !settingsFrozen,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("Alarm Sound Selection", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                Text(
+                    text = if (ringtoneUri.isNullOrBlank()) "Current: Built-in Default Loud Alarm" else "Current: $ringtoneUri",
+                    fontSize = 12.sp,
+                    color = Color.LightGray
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        enabled = !settingsFrozen,
+                        onClick = {
+                            val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+                                putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALARM)
+                                putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+                            }
+                            ringtonePickerLauncher.launch(intent)
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("System Tone")
+                    }
+                    OutlinedButton(
+                        enabled = !settingsFrozen,
+                        onClick = { mp3PickerLauncher.launch(arrayOf("audio/*")) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Pick MP3 File")
+                    }
+                }
+            }
+        }
+
+        Button(
+            onClick = {
+                BootReceiver.startAlarmService(context, remainingSteps = 10, totalTargetSteps = 10)
+            },
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD50000)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(54.dp)
+        ) {
+            Text(
+                text = "🚨 TRIGGER 10-STEP TEST ALARM NOW",
+                fontWeight = FontWeight.ExtraBold,
+                color = Color.White
+            )
+        }
+
+        PermissionChecklistCard(
+            refreshTick = permissionRefreshTick,
+            onRequestRuntimePermissions = {
+                val perms = mutableListOf<String>()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    perms.add(Manifest.permission.ACTIVITY_RECOGNITION)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    perms.add(Manifest.permission.POST_NOTIFICATIONS)
+                }
+                if (perms.isNotEmpty()) {
+                    runtimePermissionLauncher.launch(perms.toTypedArray())
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun PermissionChecklistCard(
+    refreshTick: Int,
+    onRequestRuntimePermissions: () -> Unit
+) {
+    val context = LocalContext.current
+    val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+    val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+    val adminComponent = ComponentName(context, AlarmDeviceAdminReceiver::class.java)
+
+    val hasExactAlarm = remember(refreshTick) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) alarmManager.canScheduleExactAlarms() else true
+    }
+    val hasActivityAndNotif = remember(refreshTick) {
+        val actOk = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACTIVITY_RECOGNITION) == PackageManager.PERMISSION_GRANTED
+        } else true
+        val notifOk = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        } else true
+        actOk && notifOk
+    }
+    val hasOverlay = remember(refreshTick) { Settings.canDrawOverlays(context) }
+    val hasBatteryUnrestricted = remember(refreshTick) {
+        powerManager.isIgnoringBatteryOptimizations(context.packageName)
+    }
+    val hasDeviceAdmin = remember(refreshTick) { dpm.isAdminActive(adminComponent) }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text("Anti-Cheat & System Readiness Checklist", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+
+            PermissionRow("1. Activity Sensor & Notifications", hasActivityAndNotif) {
+                onRequestRuntimePermissions()
+            }
+            PermissionRow("2. Exact Alarm Permission", hasExactAlarm) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    context.startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM))
+                }
+            }
+            PermissionRow("3. Display Over Other Apps (Lock Screen)", hasOverlay) {
+                context.startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:${context.packageName}")
+                    )
+                )
+            }
+            PermissionRow("4. Ignore Battery Optimizations", hasBatteryUnrestricted) {
+                context.startActivity(
+                    Intent(
+                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        Uri.parse("package:${context.packageName}")
+                    )
+                )
+            }
+            PermissionRow("5. Device Admin (Blocks Uninstalling)", hasDeviceAdmin) {
+                val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+                    putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, adminComponent)
+                    putExtra(
+                        DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                        context.getString(R.string.admin_description)
+                    )
+                }
+                context.startActivity(intent)
+            }
+        }
+    }
+}
+
+@Composable
+fun PermissionRow(title: String, granted: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = if (granted) "✅ $title" else "❌ $title",
+            fontSize = 14.sp,
+            modifier = Modifier.weight(1f)
+        )
+        if (!granted) {
+            TextButton(onClick = onClick) {
+                Text("Grant")
+            }
+        }
+    }
+}
+"""
+}
+
+def create_files():
+    for filepath, content in files.items():
+        dir_name = os.path.dirname(filepath)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"Successfully created: {filepath}")
+    print("\nAll project files generated successfully!")
+
+if __name__ == "__main__":
+    create_files()
